@@ -1,0 +1,1 @@
+{"units": "mlx_gpu", "M": 1024, "K": 4096, "N": 4096, "layers": 8, "t_med_ms": 59.56770799821243, "t_min_ms": 57.699707918800414, "tflops_med": 4.614545635233252, "tflops_best": 4.763939313710736, "weight_MB": 268.435456, "weight_GBps_med": 4.506392221907473, "weight_GBps_best": 4.652284486045641, "total_GBps_med": 4.788041735776689}

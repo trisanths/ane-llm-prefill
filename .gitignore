@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Large regeneratable test fixtures (weight blobs for the patch experiment)
+*.npy
+
+# Bulky raw powermetrics dumps (processed summaries are kept as *.jsonl)
+results/power_both.log
+results/power_gpu60.log
+
+# macOS
+.DS_Store

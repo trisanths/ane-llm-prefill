@@ -1,0 +1,1 @@
+{"bench": "chain_tiled", "engine": "aneforge", "precision": "fp16", "M": 1024, "K": 4096, "N": 4096, "layers": 8, "kt": 1024, "n_ops": 88, "build_s": 3.41, "t_med_ms": 22.450145974289626, "t_sd_ms": 5.148517959950453, "iters": 120, "tops_med": 12.243925151257185}

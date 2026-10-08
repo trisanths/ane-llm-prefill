@@ -1,0 +1,2 @@
+{"mode": "independent", "engines": ["ane"], "M": 1024, "K": 4096, "N": 4096, "layers": 8, "results": [{"engine": "ane", "iters": 283, "seconds": 12.040753999957815, "tflops": 6.4605960445188515}], "aggregate_tflops": 6.4605960445188515}
+{"mode": "independent", "engines": ["gpu"], "M": 1024, "K": 4096, "N": 4096, "layers": 8, "results": [{"engine": "gpu", "iters": 211, "seconds": 12.029669375042431, "tflops": 4.821349328645154}], "aggregate_tflops": 4.821349328645154}

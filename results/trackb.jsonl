@@ -1,0 +1,1 @@
+{"bench": "bonsai_roofline", "load_s": 3.0, "weight_GB": 2.3, "decode_tok_s": 45.1, "per_tok_ms": 22.171, "fwd_only_tok_s": 41.63, "fwd_only_ms": 24.023, "sampling_python_ms": -1.852, "bw_ceiling_tok_s": 69.1, "achieved_frac_of_roofline": 0.653, "implied_bw_GBps": 103.9, "mem": {"rss_gb": 0.88, "swap_used_gb": 8.48, "free_ram_gb": 0.22}}
