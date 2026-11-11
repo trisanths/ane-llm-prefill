@@ -158,3 +158,74 @@ Kernel work on batch-1 decode for this model is worth about 1.2x at best, in
 total, and the persistent-kernel part needs grid-wide sync, which Metal does
 not guarantee. Speculative decoding is the lever that can pass the stream
 floor. KV quantization is the lever for long context.
+
+## Speculative decoding (2026-11-11, evening)
+
+Target mlx-community/Qwen3-8B-4bit (545dc4251c), draft
+mlx-community/Qwen3-0.6B-4bit (73e3e38d98), mlx_lm's own speculative loop,
+greedy, chat template with thinking off, 192 new tokens per prompt.
+
+### Verify cost: MLX re-reads the weights for every row
+
+MLX's `qmv` launches one set of threadgroups per input row, so a forward over
+M tokens reads the weights M times until M reaches the `qmm` path at 6, which
+pads M to 32. Checking k draft tokens therefore costs nearly k decode steps.
+That cost sets whether speculative decoding can win at all.
+
+`qmv_h2.py` is a small-M kernel for affine 4-bit, group 64. It reads each
+weight word once for all M rows. It builds two fp16 weights per pair of
+integer ops (OR the nibbles into the 1024.0 bit pattern, subtract 1024
+exactly) and accumulates in half2 only within one 8-value word, then in fp32.
+Error against an fp32 dequantized reference is 2.4e-3 (MLX: 7e-3 at M <= 4),
+and stays 2.4e-3 with activations near +-300. `spec_patch.py` routes
+2 <= M <= 8 through it; M = 5 and 7 are padded to 6 and 8.
+
+Verify time over L new tokens at 256 context, as a multiple of L = 1
+(`verify_cost.py`, medians of 15 interleaved rounds):
+
+| L | 8B, MLX | 8B, qmv_h2 | 1.7B, MLX | 1.7B, qmv_h2 |
+|---|---|---|---|---|
+| 2 | 1.58 | 1.15 | 1.48 | 1.33 |
+| 3 | 2.25 | 1.39 | 2.11 | 1.63 |
+| 4 | 3.03 | 1.74 | 2.68 | 2.00 |
+| 6 | 5.46 | 2.37 | 4.71 | 2.61 |
+| 8 | 5.85 | 3.14 | 5.04 | 3.29 |
+
+The kernel is still ALU-bound, not bandwidth-bound: the 4-bit unpack plus
+one FMA per weight per row saturates the M2 Pro's ALUs before the memory
+bus. Splitting rows across simd groups, half-precision x, wider tiles and
+more rows per simd group were all swept (`tune_qmv.py`, `tune_h2.py`); none
+reached L = 4 for less than 1.7x. A simdgroup_matrix path with an 8-row M
+tile is the next step for this kernel.
+
+### End to end
+
+Speedup over the 8B target alone (33.5 tok/s mean). "acc" is the share of
+output tokens that came from the draft.
+
+| prompt | best stock mlx_lm | best with qmv_h2 | acc at that k |
+|---|---|---|---|
+| code | 0.94x (k=2) | 1.35x (k=3) | 0.69 |
+| prose | 0.61x (k=2) | 0.81x (k=3) | 0.49 |
+| explain | 0.69x (k=2) | 0.85x (k=2) | 0.51 |
+| list | 0.75x (k=2) | 0.95x (k=2) | 0.51 |
+| mean | 0.75x (k=2) | 0.97x (k=2) | 0.52 |
+
+- **Stock speculative decoding is a net loss on this Mac** at every k for
+  every prompt type. Most users who turn on `--draft-model` here get slower
+  output.
+- **With the verify kernel it is break-even on average** and a 1.35x win on
+  code, where the 0.6B draft agrees with the target more often.
+- **A cost model fits the numbers.** Per round: k draft steps (about 6.5 ms
+  each) plus one verify of k+1 tokens, divided by the tokens kept. At k=2 on
+  prose, (2 x 6.5 + 50) ms / 2.1 tokens is about 30 ms per token, which is
+  0.97x of the 33 ms target step.
+
+### What would make it win
+
+| lever | effect in the cost model |
+|---|---|
+| verify kernel at about 1.05x for L <= 4 (simdgroup_matrix) | k=3 code to about 1.8x, mean above 1.2x |
+| draft cost near its 2.3 ms floor (fused tiny model, or the draft on the ANE in parallel) | removes about 20 percent of each round |
+| zero-cost drafts (prompt lookup or n-gram) for code and edits | removes the draft step entirely where text repeats |
+| a better-matched draft (Qwen3-1.7B, or a trained draft head) | raises acceptance, at more draft cost |
