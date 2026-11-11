@@ -81,13 +81,80 @@ From `entropy.py`, order-0 entropy over all 1720.5M quantized weights:
 - Per-tensor code entropy runs from 3.630 to 3.725. The v_proj tensors are
   the most compressible.
 
-## Combined headroom on this model
+## Fusing the small kernels (2026-11-11, later the same day)
+
+`fused_qwen3.py` builds the decode step from the loaded weights in four modes.
+`ab.py` runs them interleaved, 12 rounds of 64 tokens each, with the order
+rotated per round. All modes use mlx_lm's own KVCache, so KV handling is
+identical and only the kernels differ.
+
+| mode | kernels per token | median ms | vs stock (paired median) |
+|---|---|---|---|
+| stock mlx_lm | 650 | 8.34 | 1.000 |
+| merge: q/k/v as one matmul, gate/up as one | 566 | 9.41 | 0.933 |
+| fused: merge plus add+RMSNorm and qk-norm+RoPE kernels | 426 | 8.41 | 0.969 |
+| skeleton: matmuls and attention only, wrong output | 313 | 7.99 | 1.069 |
+
+The kernel counts include a KV-buffer resize, because the 256-token prompt
+sits on the 256-step allocation boundary; most tokens have about 110 fewer.
+
+- **Fusion is worth at most about 7 percent.** The skeleton deletes every
+  norm, RoPE, residual add and SwiGLU, and gains only 1.07x. The earlier
+  "up to 1.23x" bound assumed that the small kernels cause the whole 1.4 ms
+  gap. They do not.
+- **The fused path ties stock.** It cut 224 kernels and did not get faster.
+  Its greedy tokens match stock for 27 of 64 tokens (step-0 max logit
+  difference 0.31), and the text is the same for the first 24 tokens. The
+  difference is bf16 rounding order in the norm and RoPE, not a bug that
+  changes the meaning, but it is not bit-exact.
+- **Merging matmuls helps alone and not in the full step.** Alone, merged
+  q/k/v runs 28 layers in 1.47 ms against 2.06 ms for three matmuls. In the
+  full step, merge reads slower than stock. The spread across rounds is
+  0.65 to 1.23, so the full-step effect is inside the noise.
+- **The rest of the gap is kernel boundaries and attention.** The 113 weight
+  matmuls alone, run as a dependent chain, take 7.17 ms. Run independently,
+  they take 6.56 ms, which is the stream floor (`qmv_chain.py`). That is
+  about 5 us per dependency boundary. The o_proj matmul (2.36 MB) streams at
+  93 GB/s and q/k/v (4.72 MB) at 125 GB/s; large ones reach 148 to 164 GB/s.
+  Small matrices pay their start and tail.
+- **Machine noise.** The desktop shares the GPU with WindowServer, a VM and a
+  browser. Single runs of identical code move 10 to 30 percent. Use paired
+  interleaved rounds and medians only.
+
+### A trap: in-place KV writes and pipelining
+
+A decode loop that keeps its own preallocated KV buffer and writes it with
+`buf[..., pos:pos+1] = k` can lose MLX's in-place donation when the next
+token's graph is queued before the previous token finishes. MLX then copies
+the whole buffer on every write. With a 4096-token buffer this cost 0.83 ms
+per token against a 512-token buffer; a microtest with 56 buffers moved from
+0.75 to 3.2 ms when only the capacity changed. mlx_lm's KVCache did not show
+the copy at 16K context (23.3 ms against a 19.0 ms floor). Keep KV in mlx_lm's
+cache class, or verify donation, before trusting a custom loop.
+
+### Context length, stock mlx_lm
+
+| context | KV read per token | ms/token | tok/s | floor at 150 GB/s |
+|---|---|---|---|---|
+| 256 | 29 MB | 9.64 | 103.7 | 6.65 ms |
+| 4096 | 470 MB | 13.33 | 75.0 | 9.58 ms |
+| 16384 | 1879 MB | 23.26 | 43.0 | 18.98 ms |
+
+At 16K context, the KV cache is twice the weight bytes. Decode speed at long
+context is a KV-bytes problem, which makes KV quantization the lever for
+priority 3. This table was measured during heavy machine load (the 256-token
+row is 1.2x slower than the clean run above).
+
+## Headroom on this model, revised
 
 | lever | gain over mlx_lm |
 |---|---|
-| close the 1.4 ms GPU gap by fusing small kernels | up to 1.23x |
+| fuse small kernels (measured upper bound) | up to 1.07x |
+| remove matmul dependency barriers (one persistent kernel) | up to 1.09x more |
 | lossless scales and biases (fixed width) | about 1.05x |
 | lossless codes (entropy coder) | up to 1.08x more |
-| all three | about 1.40x at best |
 
-Speculative decoding is outside this table and can multiply on top of it.
+Kernel work on batch-1 decode for this model is worth about 1.2x at best, in
+total, and the persistent-kernel part needs grid-wide sync, which Metal does
+not guarantee. Speculative decoding is the lever that can pass the stream
+floor. KV quantization is the lever for long context.
